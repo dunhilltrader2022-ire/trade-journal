@@ -1,0 +1,18 @@
+services:
+  cockpit:
+    build: .
+    image: bitfunded-cockpit:1
+    container_name: bitfunded-cockpit
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8080:8080"     # open to the home network, behind the password login
+    environment:
+      COCKPIT_AUTH_REQUIRED: "1"   # refuses every page if COCKPIT_PASSWORD is missing from .env
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - cockpit-data:/data       # your journal, settings and nightly backups
+
+volumes:
+  cockpit-data:

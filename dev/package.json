@@ -1,0 +1,13 @@
+{
+  "name": "bitfunded-cockpit-dev",
+  "private": true,
+  "description": "Tests and build for the Bitfunded Trading Cockpit. The server itself has no dependencies.",
+  "scripts": {
+    "build": "sh build.sh",
+    "test": "export SEED_FILE=\"$PWD/tests/fixtures/test-data.json\"; node --test test/rules.test.js && node --test --test-concurrency=1 tests/server.test.js tests/monitor.test.js && node tests/ui.test.js && node tests/page.smoke.js && node tests/challenge-edit.smoke.js"
+  },
+  "devDependencies": {
+    "jsdom": "24.1.3",
+    "ws": "8.18.0"
+  }
+}
