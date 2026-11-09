@@ -228,7 +228,7 @@ function ensureCandles(s) {
         Sim.candles[s] = d.candles.map(function (c) { return { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }; }).concat(cur.filter(function (c) { return c.time > lastT; }));
         if (Chart.sym === s && Chart.series && Chart.tf === '1m') mountChart();
       }).catch(function () { /* keep building from ticks */ });
-    } else buildHistory(s);
+    } else { buildHistory(s); bfeedHistory(s); }
   }
   return Sim.candles[s];
 }
@@ -247,6 +247,7 @@ function simTick() {
   if (Store.mode === 'server') return;
   var vm = { calm: 0.5, normal: 1, wild: 2.5 }[Store.meta.settings.volatility || 'normal'];
   Object.keys(Sim.prices).forEach(function (s) {
+    if (bfeedLive(s)) return;
     Sim.prev[s] = Sim.prices[s];
     Sim.prices[s] = Sim.prices[s] * (1 + gauss() * R.assetInfo(s).vol * vm);
     if (Sim.candles[s]) pushCandle(s, Sim.prices[s]);
@@ -279,6 +280,79 @@ function moveTo(sym, price) {
   Sim.prices[sym] = price;
   pushCandle(sym, price);
   afterPriceMove();
+}
+/* ---------- live prices without a server (the GitHub sample): Binance's public stream, straight from the browser ----------
+ * No login or key. Pairs Binance doesn't carry, or every pair if it can't be reached, stay simulated. */
+var BFeed = { ws: null, state: 'off', lastMsg: 0, lastLive: {}, retry: 0, timer: null, error: null };
+var BINANCE_WS = 'wss://data-stream.binance.vision/ws/!miniTicker@arr', BINANCE_REST = 'https://data-api.binance.vision';
+function bfeedWanted() { return Store.mode === 'local' && feedSettings().source === 'binance' && typeof WebSocket === 'function'; }
+function bfeedLive(s) { return Store.mode === 'local' && BFeed.state !== 'off' && Date.now() - (BFeed.lastLive[s] || 0) < 30000; }
+function bfeedSync() {
+  if (bfeedWanted()) { if (!BFeed.ws && BFeed.state === 'off') bfeedConnect(); return; }
+  if (BFeed.ws) { try { BFeed.ws.onclose = null; BFeed.ws.close(); } catch (e) { /* closed */ } }
+  clearTimeout(BFeed.timer);
+  BFeed.ws = null; BFeed.state = 'off'; BFeed.lastLive = {};
+}
+function bfeedConnect() {
+  BFeed.state = BFeed.lastMsg ? 'reconnecting' : 'connecting';
+  var ws;
+  try { ws = new WebSocket(BINANCE_WS); } catch (e) { return bfeedFail('Couldn\u2019t open the connection'); }
+  BFeed.ws = ws;
+  ws.onopen = function () { BFeed.retry = 0; BFeed.error = null; };
+  ws.onmessage = function (ev) {
+    var arr; try { arr = JSON.parse(ev.data); } catch (e) { return; }
+    if (!Array.isArray(arr)) return;
+    BFeed.state = 'connected'; BFeed.lastMsg = Date.now();
+    var fresh = [];
+    arr.forEach(function (t) { if (t && typeof t.s === 'string' && /USDT$/.test(t.s)) bfeedQuote(t.s.slice(0, -4), Number(t.c), fresh); });
+    if (fresh.indexOf(Chart.sym) >= 0 && Chart.series) mountChart();
+  };
+  ws.onerror = function () { BFeed.error = 'Binance can\u2019t be reached from here'; };
+  ws.onclose = function () { BFeed.ws = null; bfeedFail(BFeed.error || 'Connection closed'); };
+}
+function bfeedFail(reason) {
+  if (!bfeedWanted()) { BFeed.state = 'off'; return; }
+  BFeed.state = 'reconnecting'; BFeed.error = reason;
+  clearTimeout(BFeed.timer);
+  BFeed.timer = setTimeout(function () { if (bfeedWanted()) bfeedConnect(); }, Math.min(60000, 2000 * Math.pow(2, BFeed.retry++)));
+}
+/* Scaled pairs (1000PEPE) multiply the underlying price, as on the server. */
+function bfeedQuote(base, price, fresh) {
+  if (!(price > 0)) return;
+  var now = Date.now();
+  Object.keys(Sim.prices).forEach(function (s) {
+    var a = R.assetInfo(s); if (a.cls === 'traditional') return;
+    var m = a.base.match(/^(1000+)(.+)$/), under = m ? m[2] : a.base;
+    if (under !== base) return;
+    var p = price * (m ? Number(m[1]) : 1);
+    if (!BFeed.lastLive[s]) {   // first real price: drop the simulated history so the chart starts from the real market
+      delete Sim.candles[s];
+      Object.keys(TFData).forEach(function (k) { if (k.indexOf(s + '|') === 0) delete TFData[k]; });
+      fresh.push(s);
+    }
+    BFeed.lastLive[s] = now;
+    Sim.prev[s] = Sim.prices[s]; Sim.prices[s] = p;
+    pushCandle(s, p);
+  });
+}
+function bfeedKlines(sym, interval, limit) {
+  var a = R.assetInfo(sym);
+  if (a.cls === 'traditional' || typeof fetch !== 'function') return Promise.resolve(null);
+  var m = a.base.match(/^(1000+)(.+)$/), under = m ? m[2] : a.base, mult = m ? Number(m[1]) : 1;
+  return fetch(BINANCE_REST + '/api/v3/klines?symbol=' + encodeURIComponent(under + 'USDT') + '&interval=' + interval + '&limit=' + limit)
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (rows) { return Array.isArray(rows) && rows.length ? rows.map(function (k) { return { time: Math.floor(k[0] / 1000), open: k[1] * mult, high: k[2] * mult, low: k[3] * mult, close: k[4] * mult }; }) : null; })
+    .catch(function () { return null; });
+}
+function bfeedHistory(s) {
+  if (!bfeedWanted()) return;
+  bfeedKlines(s, '1m', 300).then(function (hist) {
+    if (!hist || !bfeedWanted()) return;
+    var cur = Sim.candles[s] || [], lastT = hist[hist.length - 1].time;
+    Sim.candles[s] = hist.concat(cur.filter(function (c) { return c.time > lastT && bfeedLive(s); }));
+    if (!bfeedLive(s)) { Sim.prev[s] = Sim.prices[s]; Sim.prices[s] = hist[hist.length - 1].close; }
+    if (Chart.sym === s && Chart.series && Chart.tf === '1m') mountChart();
+  });
 }
 function candlesBetween(sym, from, to, cap) {
   var f0 = Math.floor(from / MIN) * MIN;
@@ -708,7 +782,8 @@ function renderLive() {
   var ls = document.getElementById('liveStatus');
   if (ls) {
     var fh = feedHealth(), simulated = Store.mode !== 'server' || !Feed.snap || Feed.snap.source === 'simulated';
-    var lsText = simulated ? 'Simulated prices' : fh ? 'Live prices · interrupted' : 'Live prices · connected';
+    var lsText = Store.mode === 'local' && BFeed.state !== 'off' ? (BFeed.state === 'connected' && Date.now() - BFeed.lastMsg < 30000 ? 'Live prices · Binance' : BFeed.state === 'connecting' ? 'Connecting to Binance\u2026' : 'Binance not reachable · simulated') : simulated ? 'Simulated prices' : fh ? 'Live prices · interrupted' : 'Live prices · connected';
+    if (Store.mode === 'local' && BFeed.state !== 'off') fh = BFeed.state === 'connected' || BFeed.state === 'connecting' ? null : { level: 'warn' };
     if (ls.textContent !== lsText) ls.textContent = lsText;
     ls.classList.toggle('bad', !!fh);
   }
@@ -851,6 +926,7 @@ function chartPanelHTML() {
     '<div class="small muted" style="padding:8px 16px;border-top:1px solid var(--line)"><a href="#feed" id="dbSrc">Price source: ' + esc(priceSourceLabel(ui.sym)) + '</a> · ' + tfInfo(ui.tf).name + ' candles<span id="dbTfNote"></span> · lines show entries, stops, targets and alerts for ' + esc(currentAccount().name) + '</div>';
 }
 function priceSourceLabel(sym) {
+  if (Store.mode === 'local' && BFeed.state !== 'off') return bfeedLive(sym) ? 'Binance · live' : R.assetInfo(sym).cls === 'traditional' ? 'Simulated (Binance has no price for this pair)' : 'Binance · not connected, simulated for now';
   if (Store.mode !== 'server') return FEED_SOURCES[feedSettings().source] || 'Simulated';
   var src = Feed.snap ? Feed.snap.source : 'simulated', s = (Sim.src || {})[sym];
   return src === 'simulated' ? 'Simulated' : (FEED_SOURCES[src] || src) + (s === 'live' ? ' · live' : s === 'stale' ? ' · stale' : ' · simulated for this pair');
@@ -1211,7 +1287,7 @@ function barsForChart(bars) { return bars.map(function (x) { return { time: x.ti
 function chartBars(sym, tf) {
   if (tf === '1m') return ensureCandles(sym);
   var sec = tfInfo(tf).sec;
-  if (Store.mode !== 'server') return aggregateBars(ensureCandles(sym), sec);
+  if (Store.mode !== 'server' && !(bfeedWanted() && R.assetInfo(sym).cls !== 'traditional')) return aggregateBars(ensureCandles(sym), sec);
   var key = sym + '|' + tf, c = TFData[key];
   if (!c) c = TFData[key] = { bars: aggregateBars(ensureCandles(sym), sec), at: 0, built: false, loading: false };
   if (!c.loading && Date.now() - c.at > 60000) fetchTfBars(sym, tf, c);
@@ -1220,7 +1296,8 @@ function chartBars(sym, tf) {
 function fetchTfBars(sym, tf, c) {
   c.loading = true;
   var first = !c.at;
-  fetch('api/candles?sym=' + encodeURIComponent(sym) + '&tf=' + tf).then(function (r) { return r.json(); }).then(function (d) {
+  (Store.mode === 'server' ? fetch('api/candles?sym=' + encodeURIComponent(sym) + '&tf=' + tf).then(function (r) { return r.json(); })
+    : bfeedKlines(sym, tf, 500).then(function (c) { return c ? { candles: c, history: 'exchange' } : null; })).then(function (d) {
     c.loading = false;
     if (!d || !Array.isArray(d.candles) || !d.candles.length) return;
     c.bars = barsForChart(d.candles); c.at = Date.now(); c.built = d.history === 'built';
@@ -2017,7 +2094,7 @@ var actions = {
     fetch('api/import', { method: 'POST', headers: serverHeaders(), body: c.text }).then(function (r) { return r.json().then(function (b) { if (!r.ok) throw b; toast('Restored. Safety copy saved as ' + b.safetyCopy + '.', 'good'); }); })
       .catch(function (e) { toast((e && e.message) || 'Restore failed.', 'danger'); renderRoute(); });
   },
-  feedSrc: function (d) { if (d.v === 'coingecko' && !CG.connected) return; saveFeed({ source: d.v }); if (Store.mode === 'server') { Sim.candles = {}; TFData = {}; toast('Price source: ' + FEED_SOURCES[d.v] + '.', 'good'); setTimeout(function () { if (Chart.chart) mountChart(); }, 1500); } },
+  feedSrc: function (d) { if (d.v === 'coingecko' && !CG.connected) return; saveFeed({ source: d.v }); if (Store.mode === 'local') { bfeedSync(); Sim.candles = {}; TFData = {}; if (Chart.chart) mountChart(); renderRoute(); } if (Store.mode === 'server') { Sim.candles = {}; TFData = {}; toast('Price source: ' + FEED_SOURCES[d.v] + '.', 'good'); setTimeout(function () { if (Chart.chart) mountChart(); }, 1500); } },
   feedFilter: function (d) { ui.feedFilter = d.v; renderRoute(); },
   pairImport: function (d) { importPairs(d.mode === 'add' ? 'add' : 'replace'); },
   pairCls: function (d) { ui.pairCls = d.v; setHTML('pairTable', pairTableHTML(), true); renderRoute(); },
@@ -2216,6 +2293,7 @@ var booted = false;
 function boot2() {
   if (booted) return; booted = true;
   simInit();
+  bfeedSync();
   if (!byId('accounts', ui.acctId)) ui.acctId = (activeAccounts()[0] || {}).id || null;
   focusOpenPosition();
   renderTopbar(); renderRoute();

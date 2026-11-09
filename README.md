@@ -6,7 +6,7 @@ This is an unofficial personal tool, not made or endorsed by Bitfunded. Check ev
 
 ## Try it without installing
 
-Download [`Sample-Site.html`](Sample-Site.html) and open it in a browser. It fills itself with made-up accounts and trades and runs on simulated prices, saved only in that browser.
+Open the sample at **https://dunhilltrader2022-ire.github.io/trade-journal/**, or download [`Sample-Site.html`](Sample-Site.html) and open it in a browser. It fills itself with made-up accounts and trades, saved only in that browser, and shows live crypto prices straight from Binance's public price stream (no login or key). Gold, silver and TSLA are simulated, and if Binance can't be reached, everything falls back to simulated prices. Screenshots, exports, Telegram and Claude reviews need the installed version, because they run on its server.
 
 ## What it does
 

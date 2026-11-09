@@ -319,6 +319,26 @@ const check = (cond, msg) => { console.log((cond ? 'PASS ' : 'FAIL ') + msg); if
   setVal('#soHandle', 'bad handle!!'); submit('#socialForm'); await sleep(100);
   check(/valid X handle/.test($('#soMsg').textContent), 'invalid handle rejected');
 
+  // Live prices without a server (the GitHub sample): Binance's public stream from the browser. A stand-in replaces the real socket.
+  const sockets = [];
+  w.WebSocket = function (url) { this.url = url; sockets.push(this); };
+  w.WebSocket.prototype.close = function () { this.closed = true; };
+  await go('#feed');
+  click($('[data-act="feedSrc"][data-v="binance"]')); await sleep(80);
+  check(sockets.length === 1 && /binance\.vision/.test(sockets[0].url), 'choosing Binance live opens the public stream');
+  const sock = sockets[0];
+  sock.onopen && sock.onopen();
+  sock.onmessage({ data: JSON.stringify([{ s: 'BTCUSDT', c: '123456.5' }, { s: 'ETHUSDT', c: '4321' }, { s: 'BTCEUR', c: '1' }]) }); await sleep(1100);
+  check(w.Sim.prices['BTC/USDT'] === 123456.5 && w.Sim.prices['ETH/USDT'] === 4321, 'live quotes replace simulated prices');
+  check(d.getElementById('liveStatus').textContent === 'Live prices · Binance', 'the top bar says prices are live');
+  check(w.Sim.prices['BTC/USDT'] === 123456.5, 'the simulation leaves live pairs alone');
+  check(!w.bfeedLive('XAU/USD') && /Simulated/.test(w.priceSourceLabel('XAU/USD')), 'gold stays simulated');
+  sock.onclose(); await sleep(1100);
+  check(/not reachable/.test(d.getElementById('liveStatus').textContent), 'a dropped connection is shown');
+  click($('[data-act="feedSrc"][data-v="simulated"]')); await sleep(1100);
+  check(d.getElementById('liveStatus').textContent === 'Simulated prices' && w.BFeed.state === 'off', 'switching back to Simulated stops it');
+  check(w.Sim.prices['BTC/USDT'] !== 123456.5, 'and simulated prices move again');
+
   // Reset
   await go('#lab');
   click($('[data-act="askReset"]')); await sleep(80); click($('[data-act="doReset"]')); await sleep(400);
